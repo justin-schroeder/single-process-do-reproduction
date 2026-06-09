@@ -1,0 +1,28 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "single-process-do-reproduction",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-06-09",
+  "account_id": "ed269c6a2c3e56ba52f446942df04ee3",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "BLOCKER",
+        "class_name": "BlockerDO"
+      },
+      {
+        "name": "RESPONDER",
+        "class_name": "ResponderDO"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["BlockerDO", "ResponderDO"]
+    }
+  ],
+  "observability": {
+    "enabled": true
+  }
+}
