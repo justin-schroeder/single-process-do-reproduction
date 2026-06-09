@@ -17,39 +17,49 @@ function json(data: JsonRecord, init?: ResponseInit): Response {
   });
 }
 
-function getDuration(request: Request): number {
+function getWorkIterations(request: Request): number {
   const url = new URL(request.url);
-  const raw = Number(url.searchParams.get("ms") ?? "3000");
-  if (!Number.isFinite(raw)) return 3000;
-  return Math.max(100, Math.min(8000, Math.trunc(raw)));
-}
-
-function busyLoop(ms: number): number {
-  const start = Date.now();
-  let spins = 0;
-
-  while (Date.now() - start < ms) {
-    spins++;
-    Math.sqrt(spins);
+  const rawIterations = url.searchParams.get("iterations");
+  if (rawIterations !== null) {
+    const iterations = Number(rawIterations);
+    if (Number.isFinite(iterations)) {
+      return Math.max(1_000_000, Math.min(300_000_000, Math.trunc(iterations)));
+    }
   }
 
-  return spins;
+  // Back-compat for quick curl experiments with ?ms=3000. This is intentionally
+  // not a wall-clock loop; production Workers may not advance Date.now() during
+  // tight CPU loops.
+  const rawMs = Number(url.searchParams.get("ms") ?? "1500");
+  const ms = Number.isFinite(rawMs) ? Math.max(100, Math.min(8000, rawMs)) : 3000;
+  return Math.trunc(ms * 33_000);
+}
+
+function busyLoop(iterations: number): { accumulator: number; iterations: number } {
+  let accumulator = 0;
+
+  for (let i = 0; i < iterations; i++) {
+    accumulator =
+      (accumulator + Math.sqrt((i % 997) + (accumulator % 13))) % 1_000_000;
+  }
+
+  return { accumulator, iterations };
 }
 
 export class BlockerDO extends DurableObject<Env> {
   async fetch(request: Request): Promise<Response> {
-    const ms = getDuration(request);
+    const iterations = getWorkIterations(request);
     const startedAt = Date.now();
-    const spins = busyLoop(ms);
+    const work = busyLoop(iterations);
     const finishedAt = Date.now();
 
     return json({
       durableObject: "BlockerDO",
-      requestedBlockMs: ms,
+      requestedIterations: iterations,
       observedBlockMs: finishedAt - startedAt,
       startedAt,
       finishedAt,
-      spins,
+      accumulator: work.accumulator,
     });
   }
 }
@@ -77,11 +87,11 @@ async function callResponder(env: Env): Promise<Response> {
 }
 
 async function runServerSideRace(env: Env, request: Request): Promise<Response> {
-  const ms = getDuration(request);
+  const iterations = getWorkIterations(request);
   const startedAt = Date.now();
   const blockerPromise = callBlocker(
     env,
-    new Request(`https://do.internal/block?ms=${ms}`)
+    new Request(`https://do.internal/block?iterations=${iterations}`)
   ).then(async (response) => response.json<JsonRecord>());
   const responderPromise = callResponder(env).then(async (response) => {
     const body = await response.json<JsonRecord>();
@@ -258,9 +268,8 @@ const INDEX_HTML = `<!doctype html>
 
     <section class="controls">
       <label>
-        Block time
-        <input id="duration" type="number" min="100" max="8000" step="100" value="3000" />
-        ms
+        Work iterations
+        <input id="iterations" type="number" min="1000000" max="300000000" step="1000000" value="50000000" />
       </label>
       <button id="run">Run reproduction</button>
     </section>
@@ -286,7 +295,7 @@ const INDEX_HTML = `<!doctype html>
 
   <script>
     const run = document.querySelector("#run");
-    const duration = document.querySelector("#duration");
+    const iterationsInput = document.querySelector("#iterations");
     const pingElapsed = document.querySelector("#pingElapsed");
     const blockElapsed = document.querySelector("#blockElapsed");
     const summary = document.querySelector("#summary");
@@ -308,7 +317,7 @@ const INDEX_HTML = `<!doctype html>
     }
 
     run.addEventListener("click", async () => {
-      const ms = Math.max(100, Math.min(8000, Number(duration.value) || 3000));
+      const iterations = Math.max(1000000, Math.min(300000000, Number(iterationsInput.value) || 50000000));
       run.disabled = true;
       setText(pingElapsed, "running");
       setText(blockElapsed, "running");
@@ -316,10 +325,10 @@ const INDEX_HTML = `<!doctype html>
       details.textContent = "Started both requests at " + new Date().toISOString();
 
       try {
-        const blockPromise = timedJson("/api/block?ms=" + ms);
+        const blockPromise = timedJson("/api/block?iterations=" + iterations);
         const pingPromise = timedJson("/api/ping");
         const [block, ping] = await Promise.all([blockPromise, pingPromise]);
-        const blocked = ping.elapsedMs > Math.max(500, ms * 0.75);
+        const blocked = ping.elapsedMs > Math.max(500, block.elapsedMs * 0.75);
 
         setText(pingElapsed, ping.elapsedMs + " ms");
         setText(blockElapsed, block.elapsedMs + " ms");
